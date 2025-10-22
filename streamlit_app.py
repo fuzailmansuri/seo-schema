@@ -6,6 +6,7 @@ import re
 from io import BytesIO
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+import tempfile
 
 import pandas as pd
 import streamlit as st
@@ -29,7 +30,7 @@ try:
         ytdlp_extract_video_details,
         ytdlp_extract_channel_title,
         safe_filename,
-        build_dataframe_fast,
+        scrape_channel_to_excel_realtime,
     )
 except ImportError as e:
     st.error(f"Missing required dependencies: {e}")
@@ -57,45 +58,6 @@ def base_channel_url(u: str) -> str:
     return b.rstrip("/")
 
 
-def analyze_titles_gemini(titles: List[str], api_key: str, model_name: str) -> pd.DataFrame:
-    """Return a DataFrame with columns: title, analysis (2-3 sentences)."""
-    if not api_key or not GEMINI_AVAILABLE:
-        # Create empty DataFrame with proper columns
-        df = pd.DataFrame(data=None, columns=["title", "analysis"])
-        return df
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name or "gemini-1.5-flash")
-    except Exception as e:
-        st.error(f"Failed to initialize Gemini: {e}")
-        # Create empty DataFrame with proper columns
-        df = pd.DataFrame(data=None, columns=["title", "analysis"])
-        return df
-
-    rows = []
-    for t in titles:
-        prompt = (
-            "Analyze this YouTube video title in 2-3 sentences. Focus only on: "
-            "(1) What primary emotions does this title trigger? "
-            "(2) What patterns or hooks are used in the title? "
-            "Title: '" + t + "'"
-        )
-        try:
-            resp = model.generate_content(prompt)
-            text = (resp.text or "").strip()
-        except Exception as e:
-            text = f"Analysis unavailable: {e}"
-        rows.append({"title": t, "analysis": text})
-    
-    # Create DataFrame with proper columns
-    if rows:
-        df = pd.DataFrame(rows)
-        df = df.reindex(columns=["title", "analysis"])
-    else:
-        df = pd.DataFrame(data=None, columns=["title", "analysis"])
-    return df
-
-
 def list_gemini_models(api_key: str) -> List[str]:
     """Return available Gemini model names supporting text generation for this key.
     Falls back to common options if listing fails."""
@@ -110,11 +72,9 @@ def list_gemini_models(api_key: str) -> List[str]:
         genai.configure(api_key=api_key)
         names: List[str] = []
         for m in genai.list_models():
-            # Different SDK versions expose different capabilities fields
             methods = getattr(m, "supported_generation_methods", None)
             if methods and ("generateContent" in methods or "generate_text" in methods):
                 names.append(m.name)
-        # Keep stable ordering: prefer common models first, then others
         prioritized = [n for n in default if n in names]
         others = [n for n in names if n not in prioritized]
         return prioritized + others
@@ -126,11 +86,17 @@ c1, c2 = st.columns([3, 2])
 with c1:
     url_input = st.text_input("Channel link or @handle", placeholder="https://www.youtube.com/@example or @example")
 with c2:
-    # Get API key from environment variable or user input
     default_key = os.getenv("GEMINI_API_KEY", "")
     gemini_key = st.text_input("Gemini API Key (optional)", type="password", placeholder="AIza... or from HF secrets", help="Provide your own Google Gemini API key to add title analysis sheet.", value=default_key)
 
-# Model selection for Gemini analysis (populated when key is provided)
+max_videos = st.number_input(
+    "Maximum videos to extract (0 for unlimited)", 
+    min_value=0, 
+    max_value=10000, 
+    value=1000,
+    help="Limit for large channels to prevent timeouts on free tier. Set to 0 for no limit (not recommended for large channels)."
+)
+
 if gemini_key and GEMINI_AVAILABLE:
     available_models = list_gemini_models(gemini_key)
 else:
@@ -153,77 +119,115 @@ if run:
         videos_url = normalize_channel_url(url_input)
         base_url = base_channel_url(url_input)
         
-        # Create progress bar and status text
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Define progress callback function
+        start_time = time.time()
+        
         def update_progress(current, total):
-            progress_percent = int((current / total) * 100)
+            progress_percent = int((current / total) * 100) if total > 0 else 0
             progress_bar.progress(progress_percent)
-            status_text.text(f"Processing video {current} of {total}...")
+            
+            if total > 1000:
+                elapsed_time = time.time() - start_time
+                if current > 0:
+                    eta_seconds = (elapsed_time / current) * (total - current)
+                    eta_formatted = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
+                    status_text.text(f"Processing video {current} of {total} ({progress_percent}%) - ETA: {eta_formatted}")
+                else:
+                    status_text.text(f"Processing video {current} of {total} ({progress_percent}%)")
+            else:
+                status_text.text(f"Processing video {current} of {total} ({progress_percent}%)")
 
         with st.spinner("Collecting videos (may take a few minutes for large channels)..."):
             try:
                 channel_title = ytdlp_extract_channel_title(base_url)
                 clean_name = safe_filename(channel_title)
-                # Use fast parallel version with progress callback
-                df = build_dataframe_fast(videos_url, gemini_key if GEMINI_AVAILABLE else None, model_name if GEMINI_AVAILABLE else None, max_workers=5, progress_callback=update_progress)  # Reduced workers to be less aggressive
+                
+                # Create a temporary file for real-time Excel writing
+                temp_excel_file = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+                temp_excel_file.close()
+                temp_excel_path = temp_excel_file.name
+
+                scrape_channel_to_excel_realtime(
+                    videos_url,
+                    temp_excel_path,
+                    gemini_key=gemini_key if GEMINI_AVAILABLE else "",
+                    model_name=model_name if GEMINI_AVAILABLE else "",
+                    max_workers=15, # Increased workers for Streamlit
+                    progress_callback=update_progress,
+                    max_videos=max_videos if max_videos > 0 else None
+                )
+
             except Exception as e:
                 st.error(f"Error collecting videos: {str(e)}")
                 st.info("Try using the explicit /videos URL, e.g. https://www.youtube.com/@handle/videos")
-                # Try alternative approach
                 try:
                     alt_url = videos_url + "/videos" if "/videos" not in videos_url else videos_url
                     st.info(f"Trying alternative approach with URL: {alt_url}")
-                    df = build_dataframe_fast(alt_url, gemini_key if GEMINI_AVAILABLE else None, model_name if GEMINI_AVAILABLE else None, max_workers=3, progress_callback=update_progress)  # Even fewer workers
+                    
+                    temp_excel_file_alt = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+                    temp_excel_file_alt.close()
+                    temp_excel_path = temp_excel_file_alt.name
+
+                    scrape_channel_to_excel_realtime(
+                        alt_url,
+                        temp_excel_path,
+                        gemini_key=gemini_key if GEMINI_AVAILABLE else "",
+                        model_name=model_name if GEMINI_AVAILABLE else "",
+                        max_workers=15,
+                        progress_callback=update_progress,
+                        max_videos=max_videos if max_videos > 0 else None
+                    )
+
                     channel_title = ytdlp_extract_channel_title(base_url)
                     clean_name = safe_filename(channel_title)
                 except Exception as e2:
                     st.error(f"Alternative approach also failed: {str(e2)}")
                     st.stop()
                 finally:
-                    # Clear progress bar after completion
                     progress_bar.empty()
                     status_text.empty()
             else:
-                # Clear progress bar after successful completion
                 progress_bar.empty()
                 status_text.empty()
 
-        if df.empty:
+        if not os.path.exists(temp_excel_path) or os.path.getsize(temp_excel_path) == 0:
             st.error("No data extracted. Try the explicit /videos URL, e.g. https://www.youtube.com/@handle/videos")
             st.info("Note: Some channels may have restrictions that prevent data extraction.")
         else:
-            st.success(f"Found {len(df)} videos for '{channel_title}'.")
+            # Read the generated Excel file to display data and statistics
+            try:
+                df_display = pd.read_excel(temp_excel_path)
+            except Exception as e:
+                st.error(f"Error reading generated Excel file: {e}")
+                st.stop()
+
+            st.success(f"Found {len(df_display)} videos for '{channel_title}'.")
             
-            # Show a preview of the data
             st.subheader("Preview of Extracted Data")
-            st.dataframe(df.head(20), use_container_width=True)
+            st.dataframe(df_display.head(20), use_container_width=True)
             
-            # Show some statistics
             st.subheader("Channel Statistics")
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Total Videos", len(df))
+                st.metric("Total Videos", len(df_display))
             with col2:
-                if not df['views'].empty:
-                    st.metric("Total Views", f"{df['views'].sum():,}")
+                if 'Views' in df_display.columns and not df_display['Views'].empty:
+                    st.metric("Total Views", f"{df_display['Views'].sum():,}")
             with col3:
-                if not df['date'].isnull().all():
-                    st.metric("Date Range", f"{df['date'].min()} to {df['date'].max()}")
+                if 'Date' in df_display.columns and not df_display['Date'].isnull().all():
+                    st.metric("Date Range", f"{df_display['Date'].min()} to {df_display['Date'].max()}")
 
-            # Write Excel with single sheet containing analysis column
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="Videos")
-            output.seek(0)
+            with open(temp_excel_path, "rb") as f:
+                st.download_button(
+                    label="Download Excel",
+                    data=f.read(),
+                    file_name=f"{clean_name}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            
+            # Clean up the temporary file
+            os.remove(temp_excel_path)
 
-            st.download_button(
-                label="Download Excel",
-                data=output.getvalue(),
-                file_name=f"{clean_name}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-
-st.caption("Powered by yt-dlp + pandas + Streamlit")
+st.caption("Powered by yt-dlp + openpyxl + Streamlit")
