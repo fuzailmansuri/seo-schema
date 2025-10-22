@@ -152,22 +152,66 @@ if run:
     else:
         videos_url = normalize_channel_url(url_input)
         base_url = base_channel_url(url_input)
+        
+        # Create progress bar and status text
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Define progress callback function
+        def update_progress(current, total):
+            progress_percent = int((current / total) * 100)
+            progress_bar.progress(progress_percent)
+            status_text.text(f"Processing video {current} of {total}...")
+
         with st.spinner("Collecting videos (may take a few minutes for large channels)..."):
             try:
                 channel_title = ytdlp_extract_channel_title(base_url)
                 clean_name = safe_filename(channel_title)
-                # Use fast parallel version
-                df = build_dataframe_fast(videos_url, gemini_key if GEMINI_AVAILABLE else None, model_name if GEMINI_AVAILABLE else None, max_workers=10)
+                # Use fast parallel version with progress callback
+                df = build_dataframe_fast(videos_url, gemini_key if GEMINI_AVAILABLE else None, model_name if GEMINI_AVAILABLE else None, max_workers=5, progress_callback=update_progress)  # Reduced workers to be less aggressive
             except Exception as e:
                 st.error(f"Error collecting videos: {str(e)}")
                 st.info("Try using the explicit /videos URL, e.g. https://www.youtube.com/@handle/videos")
-                st.stop()
+                # Try alternative approach
+                try:
+                    alt_url = videos_url + "/videos" if "/videos" not in videos_url else videos_url
+                    st.info(f"Trying alternative approach with URL: {alt_url}")
+                    df = build_dataframe_fast(alt_url, gemini_key if GEMINI_AVAILABLE else None, model_name if GEMINI_AVAILABLE else None, max_workers=3, progress_callback=update_progress)  # Even fewer workers
+                    channel_title = ytdlp_extract_channel_title(base_url)
+                    clean_name = safe_filename(channel_title)
+                except Exception as e2:
+                    st.error(f"Alternative approach also failed: {str(e2)}")
+                    st.stop()
+                finally:
+                    # Clear progress bar after completion
+                    progress_bar.empty()
+                    status_text.empty()
+            else:
+                # Clear progress bar after successful completion
+                progress_bar.empty()
+                status_text.empty()
 
         if df.empty:
             st.error("No data extracted. Try the explicit /videos URL, e.g. https://www.youtube.com/@handle/videos")
+            st.info("Note: Some channels may have restrictions that prevent data extraction.")
         else:
             st.success(f"Found {len(df)} videos for '{channel_title}'.")
+            
+            # Show a preview of the data
+            st.subheader("Preview of Extracted Data")
             st.dataframe(df.head(20), use_container_width=True)
+            
+            # Show some statistics
+            st.subheader("Channel Statistics")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Videos", len(df))
+            with col2:
+                if not df['views'].empty:
+                    st.metric("Total Views", f"{df['views'].sum():,}")
+            with col3:
+                if not df['date'].isnull().all():
+                    st.metric("Date Range", f"{df['date'].min()} to {df['date'].max()}")
 
             # Write Excel with single sheet containing analysis column
             output = BytesIO()
