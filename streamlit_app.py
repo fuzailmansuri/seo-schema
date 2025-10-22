@@ -1,8 +1,11 @@
+import os
+# Set environment variable to use polling instead of inotify
+os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "poll"
+
 import re
 from io import BytesIO
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-import os
 
 import pandas as pd
 import streamlit as st
@@ -26,9 +29,11 @@ try:
         ytdlp_extract_video_details,
         ytdlp_extract_channel_title,
         safe_filename,
+        build_dataframe_fast,
     )
-except ImportError:
-    st.error("Missing required dependencies. Please ensure all requirements are installed.")
+except ImportError as e:
+    st.error(f"Missing required dependencies: {e}")
+    st.info("Please ensure all requirements are installed by running: pip install -r requirements.txt")
     st.stop()
 
 st.set_page_config(page_title="YouTube → Excel (yt-dlp)", page_icon="📊", layout="centered")
@@ -50,105 +55,6 @@ def base_channel_url(u: str) -> str:
     if b.startswith("@"):
         b = f"https://www.youtube.com/{b}"
     return b.rstrip("/")
-
-
-def build_dataframe_fast(channel_videos_url: str, gemini_key: Optional[str] = None, model_name: Optional[str] = None, max_workers: int = 15) -> pd.DataFrame:
-    """
-    Extract video details from a YouTube channel using parallel processing and optional Gemini analysis.
-    
-    Args:
-        channel_videos_url: URL to the channel's videos page
-        gemini_key: Optional Gemini API key for title analysis
-        model_name: Optional model name for Gemini analysis
-        max_workers: Number of parallel workers for scraping (increased to 15)
-    
-    Returns:
-        DataFrame with video details including optional analysis column
-    """
-    video_urls = ytdlp_extract_channel_video_ids(channel_videos_url)
-    total = len(video_urls)
-    
-    # Thread-safe progress tracking
-    progress_lock = threading.Lock()
-    completed = [0]
-    prog = st.progress(0, text=f"Fetching details... 0/{total}")
-    
-    # Initialize Gemini if key provided and available
-    model = None
-    if gemini_key and GEMINI_AVAILABLE:
-        try:
-            genai.configure(api_key=gemini_key)
-            model = genai.GenerativeModel(model_name or "gemini-1.5-flash")
-        except Exception as e:
-            st.warning(f"Gemini init failed: {e}")
-    
-    def fetch_video(url: str) -> Optional[Dict[str, Any]]:
-        try:
-            details = ytdlp_extract_video_details(url)
-            
-            # Add analysis inline if model available
-            if model and GEMINI_AVAILABLE:
-                try:
-                    prompt = (
-                        "Analyze this YouTube video title in 2-3 sentences. Focus only on: "
-                        "(1) What primary emotions does this title trigger? "
-                        "(2) What patterns or hooks are used in the title? "
-                        f"Title: '{details['title']}'"
-                    )
-                    resp = model.generate_content(prompt)
-                    details["analysis"] = (resp.text or "").strip()
-                except Exception:
-                    details["analysis"] = "Analysis unavailable"
-            else:
-                details["analysis"] = ""
-            
-            return details
-        except Exception as e:
-            st.warning(f"Failed: {url} ({e})")
-            return None
-    
-    rows = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_url = {executor.submit(fetch_video, url): url for url in video_urls}
-        
-        for future in as_completed(future_to_url):
-            result = future.result()
-            if result:
-                rows.append(result)
-            
-            with progress_lock:
-                completed[0] += 1
-                prog.progress(
-                    min(completed[0]/total, 1.0), 
-                    text=f"Fetching details... {completed[0]}/{total}"
-                )
-    
-    if not rows:
-        # Create empty DataFrame with proper columns
-        df = pd.DataFrame(data=None, columns=["title", "views", "date", "link", "analysis"])
-        return df
-
-    df = pd.DataFrame(rows)
-    cols = ["title", "views", "date", "link"]
-    if "analysis" in df.columns:
-        cols.append("analysis")
-    
-    # Reorder columns
-    df = df.reindex(columns=cols)
-
-    def date_key(x):
-        try:
-            return datetime.strptime(x, "%Y-%m-%d") if isinstance(x, str) else datetime.min
-        except Exception:
-            return datetime.min
-
-    # Sort by date descending where available
-    df_sorted = df.copy()
-    df_sorted["sort_date"] = df_sorted["date"].apply(date_key)
-    df_sorted = df_sorted.sort_values(by="sort_date", ascending=False)
-    df_sorted = df_sorted.drop(columns=["sort_date"])
-    
-    return df_sorted
 
 
 def analyze_titles_gemini(titles: List[str], api_key: str, model_name: str) -> pd.DataFrame:
@@ -247,10 +153,15 @@ if run:
         videos_url = normalize_channel_url(url_input)
         base_url = base_channel_url(url_input)
         with st.spinner("Collecting videos (may take a few minutes for large channels)..."):
-            channel_title = ytdlp_extract_channel_title(base_url)
-            clean_name = safe_filename(channel_title)
-            # Use fast parallel version
-            df = build_dataframe_fast(videos_url, gemini_key if GEMINI_AVAILABLE else None, model_name if GEMINI_AVAILABLE else None, max_workers=15)
+            try:
+                channel_title = ytdlp_extract_channel_title(base_url)
+                clean_name = safe_filename(channel_title)
+                # Use fast parallel version
+                df = build_dataframe_fast(videos_url, gemini_key if GEMINI_AVAILABLE else None, model_name if GEMINI_AVAILABLE else None, max_workers=10)
+            except Exception as e:
+                st.error(f"Error collecting videos: {str(e)}")
+                st.info("Try using the explicit /videos URL, e.g. https://www.youtube.com/@handle/videos")
+                st.stop()
 
         if df.empty:
             st.error("No data extracted. Try the explicit /videos URL, e.g. https://www.youtube.com/@handle/videos")
