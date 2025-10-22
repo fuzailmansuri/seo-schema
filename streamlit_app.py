@@ -6,19 +6,30 @@ import os
 
 import pandas as pd
 import streamlit as st
-import google.generativeai as genai
+
+# Try to import google.generativeai, but handle if it's not available
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    st.warning("Google Generative AI not available. AI analysis will be disabled.")
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
 import random
 
-from scrape_youtube_channel import (
-    ytdlp_extract_channel_video_ids,
-    ytdlp_extract_video_details,
-    ytdlp_extract_channel_title,
-    safe_filename,
-)
-
+try:
+    from scrape_youtube_channel import (
+        ytdlp_extract_channel_video_ids,
+        ytdlp_extract_video_details,
+        ytdlp_extract_channel_title,
+        safe_filename,
+    )
+except ImportError:
+    st.error("Missing required dependencies. Please ensure all requirements are installed.")
+    st.stop()
 
 st.set_page_config(page_title="YouTube → Excel (yt-dlp)", page_icon="📊", layout="centered")
 st.title("YouTube Channel → Excel")
@@ -62,9 +73,9 @@ def build_dataframe_fast(channel_videos_url: str, gemini_key: Optional[str] = No
     completed = [0]
     prog = st.progress(0, text=f"Fetching details... 0/{total}")
     
-    # Initialize Gemini if key provided
+    # Initialize Gemini if key provided and available
     model = None
-    if gemini_key:
+    if gemini_key and GEMINI_AVAILABLE:
         try:
             genai.configure(api_key=gemini_key)
             model = genai.GenerativeModel(model_name or "gemini-1.5-flash")
@@ -76,7 +87,7 @@ def build_dataframe_fast(channel_videos_url: str, gemini_key: Optional[str] = No
             details = ytdlp_extract_video_details(url)
             
             # Add analysis inline if model available
-            if model:
+            if model and GEMINI_AVAILABLE:
                 try:
                     prompt = (
                         "Analyze this YouTube video title in 2-3 sentences. Focus only on: "
@@ -142,7 +153,7 @@ def build_dataframe_fast(channel_videos_url: str, gemini_key: Optional[str] = No
 
 def analyze_titles_gemini(titles: List[str], api_key: str, model_name: str) -> pd.DataFrame:
     """Return a DataFrame with columns: title, analysis (2-3 sentences)."""
-    if not api_key:
+    if not api_key or not GEMINI_AVAILABLE:
         # Create empty DataFrame with proper columns
         df = pd.DataFrame(data=None, columns=["title", "analysis"])
         return df
@@ -187,7 +198,7 @@ def list_gemini_models(api_key: str) -> List[str]:
         "gemini-1.5-pro",
         "gemini-1.5-flash-8b",
     ]
-    if not api_key:
+    if not api_key or not GEMINI_AVAILABLE:
         return default
     try:
         genai.configure(api_key=api_key)
@@ -214,7 +225,7 @@ with c2:
     gemini_key = st.text_input("Gemini API Key (optional)", type="password", placeholder="AIza... or from HF secrets", help="Provide your own Google Gemini API key to add title analysis sheet.", value=default_key)
 
 # Model selection for Gemini analysis (populated when key is provided)
-if gemini_key:
+if gemini_key and GEMINI_AVAILABLE:
     available_models = list_gemini_models(gemini_key)
 else:
     available_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b"]
@@ -224,6 +235,7 @@ model_name = st.selectbox(
     options=available_models,
     index=0 if available_models else None,
     help="Choose the model for title analysis. Flash is fastest; Pro is higher quality but slower.",
+    disabled=not GEMINI_AVAILABLE
 )
 
 run = st.button("Run and Prepare Excel")
@@ -238,7 +250,7 @@ if run:
             channel_title = ytdlp_extract_channel_title(base_url)
             clean_name = safe_filename(channel_title)
             # Use fast parallel version
-            df = build_dataframe_fast(videos_url, gemini_key, model_name, max_workers=15)
+            df = build_dataframe_fast(videos_url, gemini_key if GEMINI_AVAILABLE else None, model_name if GEMINI_AVAILABLE else None, max_workers=15)
 
         if df.empty:
             st.error("No data extracted. Try the explicit /videos URL, e.g. https://www.youtube.com/@handle/videos")
