@@ -7,6 +7,8 @@ from io import BytesIO
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 import tempfile
+import atexit
+import pathlib
 
 import pandas as pd
 import streamlit as st
@@ -45,6 +47,20 @@ except ImportError as e:
     st.error(f"Missing required dependencies: {e}")
     st.info("Please ensure all requirements are installed by running: pip install -r requirements.txt")
     st.stop()
+
+# Global variables for cleanup
+temp_files = []
+
+def cleanup_temp_files():
+    """Clean up temporary files on exit"""
+    for temp_file in temp_files:
+        try:
+            pathlib.Path(temp_file).unlink(missing_ok=True)
+        except Exception as e:
+            pass  # Ignore cleanup errors
+
+# Register cleanup function
+atexit.register(cleanup_temp_files)
 
 def list_gemini_models(api_key: str) -> List[str]:
     """Lists available Gemini models."""
@@ -95,6 +111,10 @@ with tab1:
             disabled=not enable_pagination
         )
     
+    # Initialize pagination variables
+    start_page = 1
+    end_page = 1
+    
     # Show pagination controls only when enabled
     if enable_pagination:
         st.info("When pagination is enabled, the scraper will process videos in chunks. You can specify which chunks to process below.")
@@ -142,6 +162,11 @@ with tab1:
             videos_url = normalize_channel_url(url_input)
             base_url = base_channel_url(url_input)
             
+            # Initialize variables that might be used later
+            channel_title = "Unknown Channel"
+            clean_name = "channel"
+            temp_excel_path = None
+            
             # Show configuration summary
             with st.expander("Scraping Configuration", expanded=False):
                 st.write(f"**Channel URL:** {videos_url}")
@@ -183,6 +208,7 @@ with tab1:
                     temp_excel_file = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
                     temp_excel_file.close()
                     temp_excel_path = temp_excel_file.name
+                    temp_files.append(temp_excel_path)  # Track for cleanup
 
                     # Determine max videos based on pagination settings
                     actual_max_videos = max_videos if max_videos > 0 else None
@@ -217,6 +243,7 @@ with tab1:
                         temp_excel_file_alt = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
                         temp_excel_file_alt.close()
                         temp_excel_path = temp_excel_file_alt.name
+                        temp_files.append(temp_excel_path)  # Track for cleanup
 
                         scrape_channel_to_excel_realtime(
                             alt_url,
@@ -240,7 +267,7 @@ with tab1:
                     progress_bar.empty()
                     status_text.empty()
 
-            if not os.path.exists(temp_excel_path) or os.path.getsize(temp_excel_path) == 0:
+            if not temp_excel_path or not os.path.exists(temp_excel_path) or os.path.getsize(temp_excel_path) == 0:
                 st.error("No data extracted. Try the explicit /videos URL, e.g. https://www.youtube.com/@handle/videos")
                 st.info("Note: Some channels may have restrictions that prevent data extraction.")
             else:
@@ -254,7 +281,19 @@ with tab1:
                 st.success(f"Found {len(df_display)} videos for '{channel_title}'.")
                 
                 st.subheader("Preview of Extracted Data")
-                st.dataframe(df_display.head(20), use_container_width=T
+                st.dataframe(df_display.head(20), use_container_width=True)
+
+                # Provide download button
+                try:
+                    with open(temp_excel_path, "rb") as file:
+                        st.download_button(
+                            label="Download Excel File",
+                            data=file,
+                            file_name=f"{clean_name}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                except Exception as e:
+                    st.error(f"Error preparing download: {e}")
 
 with tab2:
     st.header("API Configuration")
