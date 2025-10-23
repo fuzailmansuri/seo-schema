@@ -13,6 +13,34 @@ import threading
 import time
 import os
 
+# Try to import Google API client, but handle if it's not available
+try:
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+    GOOGLE_API_AVAILABLE = True
+except ImportError:
+    GOOGLE_API_AVAILABLE = False
+    print("Google API client not installed. Install with: pip install google-api-python-client")
+
+def initialize_youtube_api():
+    """Initialize YouTube Data API client if key is available"""
+    if not GOOGLE_API_AVAILABLE:
+        return None
+    
+    api_key = os.getenv("YOUTUBE_API_KEY")
+    if not api_key:
+        return None
+    
+    try:
+        youtube = build("youtube", "v3", developerKey=api_key)
+        return youtube
+    except Exception as e:
+        print(f"Failed to initialize YouTube API client: {e}")
+        return None
+
+# Initialize YouTube API client
+youtube_api = initialize_youtube_api()
+
 def ytdlp_extract_video_details(video_url: str) -> Dict[str, Any]:
     """
     Extract detailed metadata for a given YouTube video without downloading.
@@ -23,8 +51,8 @@ def ytdlp_extract_video_details(video_url: str) -> Dict[str, Any]:
         "skip_download": True,
         "cachedir": True,
         "retry_sleep_functions": {"http": lambda n: 2 ** n, "fragment": lambda n: 2 ** n},
-        "retries": 10,
-        "fragment_retries": 10,
+        "retries": 15,  # Increased retries
+        "fragment_retries": 15,  # Increased retries
         "skip_unavailable_fragments": True,
         "include_ads": False,
         "no_warnings": True,
@@ -37,13 +65,13 @@ def ytdlp_extract_video_details(video_url: str) -> Dict[str, Any]:
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
         },
-        "socket_timeout": 60,
-        "request_timeout": 60,
-        "sleep_interval": 1,
-        "max_sleep_interval": 5,
+        "socket_timeout": 90,  # Increased timeout
+        "request_timeout": 90,  # Increased timeout
+        "sleep_interval": 2,  # Added sleep interval
+        "max_sleep_interval": 10,  # Increased max sleep
     }
     
-    max_retries = 5
+    max_retries = 7  # Increased retries
     for attempt in range(max_retries):
         try:
             with YoutubeDL(ydl_opts) as ydl:
@@ -69,8 +97,9 @@ def ytdlp_extract_video_details(video_url: str) -> Dict[str, Any]:
             }
         except Exception as e:
             if attempt < max_retries - 1:
-                wait_time = 2 ** attempt
-                print(f"Attempt {attempt + 1} failed for {video_url}: {e}. Retrying in {wait_time} seconds...")
+                # Exponential backoff with jitter
+                wait_time = (2 ** attempt) + (0.1 * attempt)  # Add jitter
+                print(f"Attempt {attempt + 1} failed for {video_url}: {e}. Retrying in {wait_time:.1f} seconds...")
                 time.sleep(wait_time)
             else:
                 print(f"Error extracting video details for {video_url} after {max_retries} attempts: {e}")
@@ -78,8 +107,10 @@ def ytdlp_extract_video_details(video_url: str) -> Dict[str, Any]:
                     print(f"Trying fallback method for {video_url}")
                     fallback_opts = ydl_opts.copy()
                     fallback_opts["user_agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-                    fallback_opts["socket_timeout"] = 90
-                    fallback_opts["request_timeout"] = 90
+                    fallback_opts["socket_timeout"] = 120
+                    fallback_opts["request_timeout"] = 120
+                    fallback_opts["sleep_interval"] = 5
+                    fallback_opts["max_sleep_interval"] = 15
                     
                     with YoutubeDL(fallback_opts) as ydl:
                         info = ydl.extract_info(video_url, download=False)
@@ -126,8 +157,8 @@ def ytdlp_extract_channel_title(channel_url: str) -> str:
         "extract_flat": "in_playlist",
         "cachedir": True,
         "retry_sleep_functions": {"http": lambda n: 2 ** n, "fragment": lambda n: 2 ** n},
-        "retries": 10,
-        "fragment_retries": 10,
+        "retries": 15,  # Increased retries
+        "fragment_retries": 15,  # Increased retries
         "skip_unavailable_fragments": True,
         "no_warnings": True,
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -139,18 +170,52 @@ def ytdlp_extract_channel_title(channel_url: str) -> str:
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
         },
-        "socket_timeout": 60,
-        "request_timeout": 60,
+        "socket_timeout": 90,  # Increased timeout
+        "request_timeout": 90,  # Increased timeout
+        "sleep_interval": 2,  # Added sleep interval
+        "max_sleep_interval": 10,  # Increased max sleep
     }
+    
+    # Try multiple approaches for channel title extraction
     title = None
+    
+    # Approach 1: Standard extraction
     try:
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(channel_url, download=False)
             if isinstance(info, dict):
                 title = info.get("title") or info.get("channel") or info.get("uploader")
     except Exception as e:
-        print(f"Error extracting channel title: {e}")
-        pass
+        print(f"Standard channel title extraction failed: {e}")
+    
+    # Approach 2: Fallback with different options
+    if not title:
+        try:
+            fallback_opts = ydl_opts.copy()
+            fallback_opts["user_agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            fallback_opts["socket_timeout"] = 120
+            fallback_opts["request_timeout"] = 120
+            
+            with YoutubeDL(fallback_opts) as ydl:
+                info = ydl.extract_info(channel_url, download=False)
+                if isinstance(info, dict):
+                    title = info.get("title") or info.get("channel") or info.get("uploader")
+        except Exception as e:
+            print(f"Fallback channel title extraction failed: {e}")
+    
+    # Approach 3: Try with /videos suffix if not already present
+    if not title and "/videos" not in channel_url:
+        try:
+            alt_url = channel_url.rstrip("/") + "/videos"
+            print(f"Trying alternative URL for channel title: {alt_url}")
+            
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(alt_url, download=False)
+                if isinstance(info, dict):
+                    title = info.get("title") or info.get("channel") or info.get("uploader")
+        except Exception as e:
+            print(f"Alternative URL channel title extraction failed: {e}")
+    
     return title or "channel"
 
 
@@ -278,7 +343,18 @@ def ytdlp_extract_channel_video_ids(channel_url: str, max_videos=None) -> List[s
 
 
 def scrape_channel_to_excel_realtime(channel_videos_url: str, output_path: str, gemini_key: str = "", model_name: str = "", max_workers: int = 10, progress_callback=None, max_videos=None):
-    video_urls = ytdlp_extract_channel_video_ids(channel_videos_url, max_videos)
+    # Import our robust extraction functions
+    try:
+        from youtube_api_wrapper import (
+            robust_extract_channel_videos,
+            robust_extract_video_details
+        )
+        # Use robust extraction with fallback
+        video_urls = robust_extract_channel_videos(channel_videos_url, max_videos)
+    except ImportError:
+        # Fallback to original yt-dlp only approach
+        video_urls = ytdlp_extract_channel_video_ids(channel_videos_url, max_videos)
+    
     if not video_urls:
         print("No video URLs found.")
         return
@@ -288,9 +364,10 @@ def scrape_channel_to_excel_realtime(channel_videos_url: str, output_path: str, 
 
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Videos"
-    header = ["Title", "Views", "Date", "Link", "Analysis"]
-    ws.append(header)
+    if ws is not None:
+        ws.title = "Videos"
+        header = ["Title", "Views", "Date", "Link", "Analysis"]
+        ws.append(header)
     wb.save(output_path)
 
     progress_lock = threading.Lock()
@@ -307,9 +384,15 @@ def scrape_channel_to_excel_realtime(channel_videos_url: str, output_path: str, 
 
     def fetch_video(url: str) -> Optional[Dict[str, Any]]:
         try:
-            details = ytdlp_extract_video_details(url)
+            # Use robust extraction with fallback
+            try:
+                from youtube_api_wrapper import robust_extract_video_details
+                details = robust_extract_video_details(url)
+            except ImportError:
+                # Fallback to original approach
+                details = ytdlp_extract_video_details(url)
             
-            if model:
+            if model and details:
                 try:
                     prompt = (
                         "Analyze this YouTube video title in 2-3 sentences. Focus only on: "
@@ -321,7 +404,7 @@ def scrape_channel_to_excel_realtime(channel_videos_url: str, output_path: str, 
                     details["analysis"] = (resp.text or "").strip()
                 except Exception as e:
                     details["analysis"] = f"Analysis unavailable: {e}"
-            else:
+            elif details:
                 details["analysis"] = ""
             
             return details
@@ -382,4 +465,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
