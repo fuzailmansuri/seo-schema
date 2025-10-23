@@ -1,10 +1,8 @@
-yt-dlp==2024.8.6
-openpyxl==3.1.2
-streamlit==1.36.0
-google-generativeai==0.7.0
-pytest==7.4.0
-pandas==2.0.0
+yt-dlp>=2024.8.6
+openpyxl>=3.1.2
+streamlit>=1.36.0
+google-generativeai>=0.7.0
+pytest>=7.4.0
+pandas>=2.0.0
 # Optional: For YouTube Data API support
-google-api-python-client==2.70.0
-
-
+google-api-python-client>=2.70.0
